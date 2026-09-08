@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""wordtrack: local, offline subtitle generator built on Whisper."""
+
+import argparse
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+MODEL_CHOICES = ["tiny", "base", "small", "medium", "large-v3"]
+FORMAT_CHOICES = ["srt", "vtt", "sbv", "ssa", "ass"]
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="wordtrack",
+        description="Generate a subtitle file from a video or audio file, "
+        "using a Whisper speech-to-text model that runs entirely on this machine.",
+    )
+    parser.add_argument(
+        "input", metavar="<input-file>", help="Path to the video or audio file to caption"
+    )
+    parser.add_argument(
+        "--model",
+        choices=MODEL_CHOICES,
+        default="small",
+        help="Whisper model size: trade-off between speed and accuracy (default: small)",
+    )
+    parser.add_argument(
+        "--words-per-line",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Max words per caption cue (default: 1)",
+    )
+    parser.add_argument(
+        "--max-gap",
+        type=float,
+        default=0.6,
+        metavar="SECONDS",
+        help="Max silence gap inside one cue before it splits (default: 0.6)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=FORMAT_CHOICES,
+        default="srt",
+        help="Subtitle output format (default: srt)",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Output subtitle path (default: <input file>.<format>)",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="en",
+        help="Spoken language code passed to the model (default: en)",
+    )
+    return parser
+
+
+def format_srt_timestamp(seconds):
+    total_ms = round(seconds * 1000)
+    hours, total_ms = divmod(total_ms, 3_600_000)
+    minutes, total_ms = divmod(total_ms, 60_000)
+    secs, ms = divmod(total_ms, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+
+def format_vtt_timestamp(seconds):
+    total_ms = round(seconds * 1000)
+    hours, total_ms = divmod(total_ms, 3_600_000)
+    minutes, total_ms = divmod(total_ms, 60_000)
+    secs, ms = divmod(total_ms, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
+
+
+def format_sbv_timestamp(seconds):
+    total_ms = round(seconds * 1000)
+    hours, total_ms = divmod(total_ms, 3_600_000)
+    minutes, total_ms = divmod(total_ms, 60_000)
+    secs, ms = divmod(total_ms, 1000)
+    return f"{hours}:{minutes:02d}:{secs:02d}.{ms:03d}"
+
+
+def format_ass_timestamp(seconds):
+    total_cs = round(seconds * 100)
+    hours, total_cs = divmod(total_cs, 360_000)
+    minutes, total_cs = divmod(total_cs, 6_000)
+    secs, cs = divmod(total_cs, 100)
+    return f"{hours}:{minutes:02d}:{secs:02d}.{cs:02d}"
+
+
+def group_words(words, words_per_line, max_gap):
+    """Group a flat list of timestamped words into caption cues.
+
+    A cue closes (and a new one starts) when it already holds
+    words_per_line words, or when the gap since the previous word
+    exceeds max_gap - whichever happens first.
+    """
+    cues = []
+    current = []
+    for word in words:
+        if current:
+            gap = word.start - current[-1].end
+            if len(current) >= words_per_line or gap > max_gap:
+                cues.append(current)
+                current = []
+        current.append(word)
+    if current:
+        cues.append(current)
+    return cues
+
+
+def cue_text(cue):
+    return "".join(word.word for word in cue).strip()
+
+
+def write_srt(cues, out_path):
+    entries = []
+    for index, cue in enumerate(cues, start=1):
+        start = format_srt_timestamp(cue[0].start)
+        end = format_srt_timestamp(cue[-1].end)
+        entries.append(f"{index}\n{start} --> {end}\n{cue_text(cue)}\n")
+    out_path.write_text("\n".join(entries), encoding="utf-8")
+
+
+def write_vtt(cues, out_path):
+    entries = ["WEBVTT\n"]
+    for index, cue in enumerate(cues, start=1):
+        start = format_vtt_timestamp(cue[0].start)
+        end = format_vtt_timestamp(cue[-1].end)
+        entries.append(f"{index}\n{start} --> {end}\n{cue_text(cue)}\n")
+    out_path.write_text("\n".join(entries), encoding="utf-8")
+
+
+def write_sbv(cues, out_path):
+    entries = []
+    for cue in cues:
+        start = format_sbv_timestamp(cue[0].start)
+        end = format_sbv_timestamp(cue[-1].end)
+        entries.append(f"{start},{end}\n{cue_text(cue)}\n")
+    out_path.write_text("\n".join(entries), encoding="utf-8")
+
+
+SSA_HEADER = """[Script Info]
+Title: wordtrack captions
+ScriptType: v4.00
+
+[V4 Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, AlphaLevel, Encoding
+Style: Default,Arial,20,16777215,65535,0,0,0,0,1,2,2,2,10,10,10,0,1
+
+[Events]
+Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def write_ssa(cues, out_path):
+    lines = [SSA_HEADER]
+    for cue in cues:
+        start = format_ass_timestamp(cue[0].start)
+        end = format_ass_timestamp(cue[-1].end)
+        lines.append(f"Dialogue: Marked=0,{start},{end},Default,,0000,0000,0000,,{cue_text(cue)}")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+ASS_HEADER = """[Script Info]
+Title: wordtrack captions
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def write_ass(cues, out_path):
+    lines = [ASS_HEADER]
+    for cue in cues:
+        start = format_ass_timestamp(cue[0].start)
+        end = format_ass_timestamp(cue[-1].end)
+        lines.append(f"Dialogue: 0,{start},{end},Default,,0000,0000,0000,,{cue_text(cue)}")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+WRITERS = {
+    "srt": write_srt,
+    "vtt": write_vtt,
+    "sbv": write_sbv,
+    "ssa": write_ssa,
+    "ass": write_ass,
+}
+
+
+class ProgressBar:
+    """A simple carriage-return progress bar for stderr.
+
+    Falls back to no output at all when stderr isn't a terminal, so
+    piped/logged runs don't fill up with escape-code noise.
+    """
+
+    def __init__(self, total, label="Transcribing", width=30):
+        self.total = total or 0
+        self.label = label
+        self.width = width
+        self.enabled = self.total > 0 and sys.stderr.isatty()
+        self._last_pct = -1
+
+    def update(self, current):
+        if not self.enabled:
+            return
+        fraction = max(0.0, min(1.0, current / self.total))
+        pct = int(fraction * 100)
+        if pct == self._last_pct:
+            return
+        self._last_pct = pct
+        filled = int(self.width * fraction)
+        bar = "#" * filled + "-" * (self.width - filled)
+        print(f"\r{self.label} [{bar}] {pct:3d}%", end="", file=sys.stderr, flush=True)
+
+    def finish(self):
+        if not self.enabled:
+            return
+        self.update(self.total)
+        print(file=sys.stderr)
+
+
+def extract_audio(input_path, workdir):
+    """Use system ffmpeg to decode input_path to a 16kHz mono wav file."""
+    wav_path = Path(workdir) / "audio.wav"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(input_path),
+        "-ac", "1",
+        "-ar", "16000",
+        "-vn",
+        str(wav_path),
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg could not decode '{input_path}':\n{stderr}")
+    return wav_path
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"wordtrack: error: file not found: {input_path}", file=sys.stderr)
+        return 1
+    if not input_path.is_file():
+        print(f"wordtrack: error: not a file: {input_path}", file=sys.stderr)
+        return 1
+
+    if args.words_per_line < 1:
+        print("wordtrack: error: --words-per-line must be at least 1", file=sys.stderr)
+        return 1
+    if args.max_gap <= 0:
+        print("wordtrack: error: --max-gap must be greater than 0", file=sys.stderr)
+        return 1
+
+    if shutil.which("ffmpeg") is None:
+        print(
+            "wordtrack: error: ffmpeg was not found on your PATH. "
+            "Install ffmpeg and try again.",
+            file=sys.stderr,
+        )
+        return 1
+
+    out_path = Path(args.out) if args.out else input_path.with_suffix(f".{args.format}")
+
+    # Deferred so `--help` and argument errors stay instant, without
+    # loading the (large, slow-to-import) speech model.
+    from faster_whisper import WhisperModel
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="wordtrack-") as workdir:
+            print(f"Decoding audio from '{input_path}'...", file=sys.stderr)
+            try:
+                wav_path = extract_audio(input_path, workdir)
+            except RuntimeError as exc:
+                print(f"wordtrack: error: {exc}", file=sys.stderr)
+                return 1
+
+            print(f"Loading '{args.model}' model...", file=sys.stderr)
+            model = WhisperModel(args.model, device="cpu", compute_type="int8")
+
+            print("Transcribing...", file=sys.stderr)
+            segments, info = model.transcribe(
+                str(wav_path),
+                language=args.language,
+                word_timestamps=True,
+                vad_filter=True,
+            )
+
+            progress = ProgressBar(total=info.duration)
+            words = []
+            for segment in segments:
+                if segment.words:
+                    words.extend(segment.words)
+                progress.update(segment.end)
+            progress.finish()
+    except Exception as exc:  # model/runtime failures: no raw traceback for the user
+        print(f"wordtrack: error: {exc}", file=sys.stderr)
+        return 1
+
+    if not words:
+        print("wordtrack: no speech detected in this file.", file=sys.stderr)
+        return 1
+
+    cues = group_words(words, args.words_per_line, args.max_gap)
+    WRITERS[args.format](cues, out_path)
+
+    print(f"Detected language: {info.language} ({info.language_probability * 100:.1f}% confidence)")
+    print(f"Wrote {len(cues)} caption cue{'s' if len(cues) != 1 else ''} to {out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

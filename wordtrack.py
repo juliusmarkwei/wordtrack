@@ -75,6 +75,22 @@ def build_parser():
         help="Max silence gap inside one cue before it splits (default: 0.6)",
     )
     parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=0.12,
+        metavar="SECONDS",
+        help="Minimum cue duration; shorter cues are extended without "
+        "overlapping the next cue (default: 0.12)",
+    )
+    parser.add_argument(
+        "--warn-threshold",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="Print a warning if the output has more than this many cues "
+        "(default: 1000; some editors import large subtitle files slowly)",
+    )
+    parser.add_argument(
         "--format",
         choices=FORMAT_CHOICES,
         default="srt",
@@ -189,6 +205,43 @@ def group_words(words, words_per_line, max_gap):
 
 def cue_text(cue):
     return "".join(word.word for word in cue).strip()
+
+
+def cue_entries(cues):
+    """Reduce grouped word-cues to plain (start, end, text) tuples."""
+    return [(cue[0].start, cue[-1].end, cue_text(cue)) for cue in cues]
+
+
+def enforce_min_duration(entries, min_duration, gap_eps=0.001):
+    """Extend any (start, end, text) cue shorter than min_duration.
+
+    A cue's end is pushed out to start + min_duration, but never past the
+    next cue's start (minus a small gap) - avoiding an overlap takes
+    priority over reaching the floor in the rare case both can't be
+    satisfied at once (cues already packed tighter than min_duration apart).
+    """
+    fixed = []
+    for i, (start, end, text) in enumerate(entries):
+        if end - start < min_duration:
+            end = start + min_duration
+            if i + 1 < len(entries):
+                next_start = entries[i + 1][0]
+                end = min(end, max(start, next_start - gap_eps))
+        fixed.append((start, end, text))
+    return fixed
+
+
+def cue_count_warning(cue_count, threshold):
+    """A human-readable warning when cue_count exceeds threshold, else None."""
+    if cue_count <= threshold:
+        return None
+    return (
+        f"Warning: wrote {cue_count} caption cues. Some editors (e.g. CapCut) are "
+        f"known to import slowly or hang on subtitle files this large. Consider "
+        f"re-running with a higher --words-per-line (e.g. 6-8) - combined with "
+        f"--max-gap, it still splits cues on natural pauses instead of "
+        f"producing one long run-on line."
+    )
 
 
 def write_srt(cues, out_path):
@@ -528,6 +581,12 @@ def run_transcribe(argv):
     if args.max_gap <= 0:
         print(style("wordtrack: error: --max-gap must be greater than 0", Colors.RED), file=sys.stderr)
         return 1
+    if args.min_duration < 0:
+        print(style("wordtrack: error: --min-duration must be at least 0", Colors.RED), file=sys.stderr)
+        return 1
+    if args.warn_threshold < 0:
+        print(style("wordtrack: error: --warn-threshold must be at least 0", Colors.RED), file=sys.stderr)
+        return 1
 
     if shutil.which("ffmpeg") is None:
         print(
@@ -586,7 +645,9 @@ def run_transcribe(argv):
         return 1
 
     cues = group_words(words, args.words_per_line, args.max_gap)
-    WRITERS[args.format](cues, out_path)
+    entries = enforce_min_duration(cue_entries(cues), args.min_duration)
+    pseudo_cues = [[ParsedWord(start, end, f" {text}")] for start, end, text in entries]
+    WRITERS[args.format](pseudo_cues, out_path)
 
     print(
         style(
@@ -597,11 +658,16 @@ def run_transcribe(argv):
     )
     print(
         style(
-            f"Wrote {len(cues)} caption cue{'s' if len(cues) != 1 else ''} to {out_path}",
+            f"Wrote {len(entries)} caption cue{'s' if len(entries) != 1 else ''} to {out_path}",
             Colors.GREEN,
             stream=sys.stdout,
         )
     )
+
+    warning = cue_count_warning(len(entries), args.warn_threshold)
+    if warning:
+        print(style(warning, Colors.YELLOW), file=sys.stderr)
+
     return 0
 
 

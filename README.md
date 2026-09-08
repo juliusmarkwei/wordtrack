@@ -60,6 +60,8 @@ wordtrack <input-file> [options]
 | `--model` | choice: `tiny`, `base`, `small`, `medium`, `large-v3` | `small` | Whisper model size — trade-off between speed and accuracy |
 | `--words-per-line` | integer | `1` | Max words per caption cue |
 | `--max-gap` | float (seconds) | `0.6` | Max silence allowed inside one cue before it splits into two |
+| `--min-duration` | float (seconds) | `0.12` | Minimum cue duration; shorter cues are extended (without overlapping the next cue) |
+| `--warn-threshold` | integer | `1000` | Print a warning if the output has more cues than this |
 | `--format` | choice: `srt`, `vtt`, `sbv`, `ssa`, `ass`, `lrc` | `srt` | Subtitle output format |
 | `--out` | path | `<input file>.<format>` | Output file path |
 | `--language` | string | `en` | Spoken language code passed to the model |
@@ -103,6 +105,35 @@ Generate WebVTT instead of SRT:
 
 ```bash
 wordtrack clip.mp4 --format vtt
+```
+
+### Very short or zero-duration cues
+
+Whisper occasionally returns a word with an identical start and end time
+(common for very short, clipped words), which would otherwise produce a
+subtitle cue with no visible duration — invalid in practice, since many
+editors don't handle a zero-length `-->` range gracefully. wordtrack
+extends any cue shorter than `--min-duration` (default `0.12` seconds) up
+to that floor, without ever pushing it past the start of the next cue.
+
+### Large word-by-word files can import slowly (or hang) in some editors
+
+The default `--words-per-line 1` produces one cue per word — the bold,
+pop-in caption style — which for a long recording can mean several
+thousand cues. Some editors (CapCut included) are known to import
+subtitle files with more than roughly 1,000 cues slowly, or appear to
+hang. If wordtrack writes more cues than `--warn-threshold` (default
+`1000`), it prints a warning to say so; the file is still written
+successfully either way.
+
+**If you hit this**, the fix is not to change `--words-per-line`'s
+default — it's to raise it for that run. `--words-per-line 6` (combined
+with the existing `--max-gap`, which still splits a cue early on any
+natural pause) produces normal-reading subtitle lines instead of
+word-by-word ones, at a fraction of the cue count:
+
+```bash
+wordtrack clip.mp4 --words-per-line 6
 ```
 
 ## Converting between caption formats
@@ -162,6 +193,12 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python3 wordtrack.py path/to/file.mp4
+```
+
+Run the test suite (pure functions only, no model or audio required):
+
+```bash
+python3 -m unittest test_wordtrack.py -v
 ```
 
 ## Troubleshooting

@@ -62,10 +62,13 @@ faster-whisper (word timestamps + VAD) → group words into cues → write
   are checked together, not as separate passes.
 - **Output format** is format-agnostic downstream of `group_words()`: the
   same `cues` list feeds any of the `write_*` functions dispatched via
-  `WRITERS[args.format]` (srt/vtt/sbv/ssa/ass). Only the per-format
+  `WRITERS[args.format]` (srt/vtt/sbv/ssa/ass/lrc). Only the per-format
   timestamp precision (ms vs. centiseconds) and file structure differ —
   adding a new format means adding a timestamp formatter + writer + a
   `WRITERS`/`FORMAT_CHOICES` entry, not touching the transcription path.
+  LRC only carries a start time per line (no cue end time, no hours
+  component) since that's the line-timestamp lyrics format, not a
+  start/end subtitle format.
 - **`language=args.language`** is always passed explicitly to
   `transcribe()` (default `"en"`), so `info.language_probability` will
   read 1.0 in normal use — faster-whisper only runs real language

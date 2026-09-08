@@ -1,7 +1,7 @@
 # wordtrack
 
 wordtrack is a local, offline command-line tool that generates subtitle
-files (SRT, VTT, SBV, SSA, or ASS) from a video or audio file, using a
+files (SRT, VTT, SBV, SSA, ASS, or LRC) from a video or audio file, using a
 Whisper speech-to-text model that runs entirely on your own machine.
 There's no cloud upload, no account, no usage limits, and no watermark.
 
@@ -60,7 +60,7 @@ wordtrack <input-file> [options]
 | `--model` | choice: `tiny`, `base`, `small`, `medium`, `large-v3` | `small` | Whisper model size — trade-off between speed and accuracy |
 | `--words-per-line` | integer | `1` | Max words per caption cue |
 | `--max-gap` | float (seconds) | `0.6` | Max silence allowed inside one cue before it splits into two |
-| `--format` | choice: `srt`, `vtt`, `sbv`, `ssa`, `ass` | `srt` | Subtitle output format |
+| `--format` | choice: `srt`, `vtt`, `sbv`, `ssa`, `ass`, `lrc` | `srt` | Subtitle output format |
 | `--out` | path | `<input file>.<format>` | Output file path |
 | `--language` | string | `en` | Spoken language code passed to the model |
 | `-h`, `--help` | flag | — | Show usage and exit immediately |

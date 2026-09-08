@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 MODEL_CHOICES = ["tiny", "base", "small", "medium", "large-v3"]
-FORMAT_CHOICES = ["srt", "vtt", "sbv", "ssa", "ass"]
+FORMAT_CHOICES = ["srt", "vtt", "sbv", "ssa", "ass", "lrc"]
 
 
 class Colors:
@@ -121,6 +121,13 @@ def format_ass_timestamp(seconds):
     return f"{hours}:{minutes:02d}:{secs:02d}.{cs:02d}"
 
 
+def format_lrc_timestamp(seconds):
+    total_cs = round(seconds * 100)
+    minutes, total_cs = divmod(total_cs, 6_000)
+    secs, cs = divmod(total_cs, 100)
+    return f"{minutes:02d}:{secs:02d}.{cs:02d}"
+
+
 def group_words(words, words_per_line, max_gap):
     """Group a flat list of timestamped words into caption cues.
 
@@ -217,12 +224,21 @@ def write_ass(cues, out_path):
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_lrc(cues, out_path):
+    entries = []
+    for cue in cues:
+        start = format_lrc_timestamp(cue[0].start)
+        entries.append(f"[{start}]{cue_text(cue)}")
+    out_path.write_text("\n".join(entries) + "\n", encoding="utf-8")
+
+
 WRITERS = {
     "srt": write_srt,
     "vtt": write_vtt,
     "sbv": write_sbv,
     "ssa": write_ssa,
     "ass": write_ass,
+    "lrc": write_lrc,
 }
 
 

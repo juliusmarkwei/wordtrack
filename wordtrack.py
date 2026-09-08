@@ -3,14 +3,19 @@
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections import namedtuple
 from pathlib import Path
 
 MODEL_CHOICES = ["tiny", "base", "small", "medium", "large-v3"]
 FORMAT_CHOICES = ["srt", "vtt", "sbv", "ssa", "ass", "lrc"]
+LRC_DEFAULT_TAIL_SECONDS = 2.0
+
+ParsedWord = namedtuple("ParsedWord", ["start", "end", "word"])
 
 
 class Colors:
@@ -43,6 +48,8 @@ def build_parser():
         prog="wordtrack",
         description="Generate a subtitle file from a video or audio file, "
         "using a Whisper speech-to-text model that runs entirely on this machine.",
+        epilog="To convert an existing caption file to another format without "
+        "re-running speech recognition, use: wordtrack convert <input-file> --format <format>",
     )
     parser.add_argument(
         "input", metavar="<input-file>", help="Path to the video or audio file to caption"
@@ -85,6 +92,37 @@ def build_parser():
         type=str,
         default="en",
         help="Spoken language code passed to the model (default: en)",
+    )
+    return parser
+
+
+def build_convert_parser():
+    parser = argparse.ArgumentParser(
+        prog="wordtrack convert",
+        description="Convert an existing caption file to another subtitle format, "
+        "without re-running speech recognition.",
+    )
+    parser.add_argument(
+        "input", metavar="<input-file>", help="Path to the existing caption file to convert"
+    )
+    parser.add_argument(
+        "--format",
+        choices=FORMAT_CHOICES,
+        required=True,
+        help="Target subtitle format",
+    )
+    parser.add_argument(
+        "--from-format",
+        choices=FORMAT_CHOICES,
+        default=None,
+        help="Source format, if it can't be inferred from the input file's extension",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Output path (default: <input file>.<format>)",
     )
     return parser
 
@@ -242,6 +280,112 @@ WRITERS = {
 }
 
 
+TIMESTAMP_RE = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d+)$")
+
+
+def parse_timestamp(text):
+    """Parse a "[H:]MM:SS[.,]frac" timestamp, as used by every supported format."""
+    match = TIMESTAMP_RE.match(text.strip())
+    if not match:
+        raise ValueError(f"unrecognized timestamp: {text!r}")
+    hours_str, minutes_str, secs_str, frac_str = match.groups()
+    hours = int(hours_str) if hours_str else 0
+    minutes = int(minutes_str)
+    secs = int(secs_str)
+    frac = int(frac_str) / (10 ** len(frac_str))
+    return hours * 3600 + minutes * 60 + secs + frac
+
+
+def parse_srt(content):
+    """Shared reader for SRT and VTT: index/header lines are ignored, only
+    blocks containing a "-->" timing line are treated as cues."""
+    cues = []
+    for block in re.split(r"\r?\n\s*\r?\n", content.strip()):
+        lines = [line for line in block.splitlines() if line.strip()]
+        timing_idx = next((i for i, line in enumerate(lines) if "-->" in line), None)
+        if timing_idx is None:
+            continue
+        start_str, _, end_str = lines[timing_idx].partition("-->")
+        try:
+            start = parse_timestamp(start_str.strip())
+            end = parse_timestamp(end_str.strip().split()[0])
+        except (ValueError, IndexError):
+            continue
+        text = " ".join(lines[timing_idx + 1:]).strip()
+        if text:
+            cues.append((start, end, text))
+    return cues
+
+
+def parse_sbv(content):
+    cues = []
+    for block in re.split(r"\r?\n\s*\r?\n", content.strip()):
+        lines = [line for line in block.splitlines() if line.strip()]
+        if not lines or "," not in lines[0]:
+            continue
+        start_str, _, end_str = lines[0].partition(",")
+        try:
+            start = parse_timestamp(start_str.strip())
+            end = parse_timestamp(end_str.strip())
+        except ValueError:
+            continue
+        text = " ".join(lines[1:]).strip()
+        if text:
+            cues.append((start, end, text))
+    return cues
+
+
+def parse_ssa_ass(content):
+    cues = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line.startswith("Dialogue:"):
+            continue
+        fields = line[len("Dialogue:"):].strip().split(",", 9)
+        if len(fields) < 10:
+            continue
+        try:
+            start = parse_timestamp(fields[1].strip())
+            end = parse_timestamp(fields[2].strip())
+        except ValueError:
+            continue
+        text = fields[9].strip().replace("\\N", " ").replace("\\n", " ")
+        if text:
+            cues.append((start, end, text))
+    return cues
+
+
+def parse_lrc(content):
+    tag_re = re.compile(r"^\[([^\]]+)\](.*)$")
+    timed = []
+    for line in content.splitlines():
+        match = tag_re.match(line.strip())
+        if not match:
+            continue
+        try:
+            start = parse_timestamp(match.group(1))
+        except ValueError:
+            continue  # metadata tag, e.g. [ar:Artist Name]
+        text = match.group(2).strip()
+        if text:
+            timed.append((start, text))
+    cues = []
+    for i, (start, text) in enumerate(timed):
+        end = timed[i + 1][0] if i + 1 < len(timed) else start + LRC_DEFAULT_TAIL_SECONDS
+        cues.append((start, end, text))
+    return cues
+
+
+READERS = {
+    "srt": parse_srt,
+    "vtt": parse_srt,
+    "sbv": parse_sbv,
+    "ssa": parse_ssa_ass,
+    "ass": parse_ssa_ass,
+    "lrc": parse_lrc,
+}
+
+
 class ProgressBar:
     """A simple carriage-return progress bar for stderr.
 
@@ -303,7 +447,70 @@ def extract_audio(input_path, workdir):
     return wav_path
 
 
-def main(argv=None):
+def run_convert(argv):
+    parser = build_convert_parser()
+    args = parser.parse_args(argv)
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(style(f"wordtrack: error: file not found: {input_path}", Colors.RED), file=sys.stderr)
+        return 1
+    if not input_path.is_file():
+        print(style(f"wordtrack: error: not a file: {input_path}", Colors.RED), file=sys.stderr)
+        return 1
+
+    source_format = args.from_format or input_path.suffix.lstrip(".").lower()
+    if source_format not in READERS:
+        print(
+            style(
+                f"wordtrack: error: unrecognized source format '{source_format}' "
+                f"(expected one of: {', '.join(FORMAT_CHOICES)}; pass --from-format to override)",
+                Colors.RED,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    if source_format == args.format:
+        print(
+            style(
+                f"wordtrack: error: source and target are both '{args.format}' — nothing to convert",
+                Colors.RED,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        content = input_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        print(style(f"wordtrack: error: could not read '{input_path}' as UTF-8: {exc}", Colors.RED), file=sys.stderr)
+        return 1
+
+    parsed = READERS[source_format](content)
+    if not parsed:
+        print(
+            style(f"wordtrack: error: no caption cues found in '{input_path}'", Colors.RED),
+            file=sys.stderr,
+        )
+        return 1
+
+    out_path = Path(args.out) if args.out else input_path.with_suffix(f".{args.format}")
+    cues = [[ParsedWord(start, end, f" {text}")] for start, end, text in parsed]
+    WRITERS[args.format](cues, out_path)
+
+    print(
+        style(
+            f"Converted {len(cues)} caption cue{'s' if len(cues) != 1 else ''} "
+            f"from {source_format} to {args.format}: {out_path}",
+            Colors.GREEN,
+            stream=sys.stdout,
+        )
+    )
+    return 0
+
+
+def run_transcribe(argv):
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -396,6 +603,13 @@ def main(argv=None):
         )
     )
     return 0
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["convert"]:
+        return run_convert(argv[1:])
+    return run_transcribe(argv)
 
 
 if __name__ == "__main__":

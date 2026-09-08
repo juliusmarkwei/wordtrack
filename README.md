@@ -105,6 +105,33 @@ Generate WebVTT instead of SRT:
 wordtrack clip.mp4 --format vtt
 ```
 
+## Converting between caption formats
+
+To convert an existing caption file to a different format without
+re-running speech recognition:
+
+```
+wordtrack convert <input-file> --format <format> [options]
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `<input-file>` | positional, required | — | Path to the existing caption file to convert |
+| `--format` | choice: `srt`, `vtt`, `sbv`, `ssa`, `ass`, `lrc` | — (required) | Target subtitle format |
+| `--from-format` | choice: `srt`, `vtt`, `sbv`, `ssa`, `ass`, `lrc` | inferred from the input file's extension | Source format override, for when the file's extension doesn't match its actual format |
+| `--out` | path | `<input file>.<format>` | Output file path |
+
+```bash
+wordtrack captions.srt --format vtt   # wrong: this re-transcribes
+wordtrack convert captions.srt --format vtt   # right: just converts
+wordtrack convert captions.lrc --format srt --out captions.srt
+```
+
+LRC only carries one timestamp per line (no cue end time). Converting
+*from* LRC synthesizes each cue's end time as the next line's start time
+(and adds a fixed 2-second tail for the last line); converting *to* LRC
+simply drops each cue's end time.
+
 ## Getting bold, animated captions onto your video
 
 wordtrack only produces the subtitle file — it does not touch your video.

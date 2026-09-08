@@ -2,6 +2,7 @@
 """wordtrack: local, offline subtitle generator built on Whisper."""
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,31 @@ from pathlib import Path
 
 MODEL_CHOICES = ["tiny", "base", "small", "medium", "large-v3"]
 FORMAT_CHOICES = ["srt", "vtt", "sbv", "ssa", "ass"]
+
+
+class Colors:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    CYAN = "\033[36m"
+
+
+def color_enabled(stream):
+    return (
+        hasattr(stream, "isatty")
+        and stream.isatty()
+        and os.environ.get("NO_COLOR") is None
+        and os.environ.get("TERM") != "dumb"
+    )
+
+
+def style(text, *codes, stream=sys.stderr):
+    if not codes or not color_enabled(stream):
+        return text
+    return "".join(codes) + text + Colors.RESET
 
 
 def build_parser():
@@ -212,6 +238,7 @@ class ProgressBar:
         self.label = label
         self.width = width
         self.enabled = self.total > 0 and sys.stderr.isatty()
+        self.color = color_enabled(sys.stderr)
         self._last_pct = -1
 
     def update(self, current):
@@ -223,8 +250,16 @@ class ProgressBar:
             return
         self._last_pct = pct
         filled = int(self.width * fraction)
-        bar = "#" * filled + "-" * (self.width - filled)
-        print(f"\r{self.label} [{bar}] {pct:3d}%", end="", file=sys.stderr, flush=True)
+        empty = self.width - filled
+        if self.color:
+            label = f"{Colors.CYAN}{self.label}{Colors.RESET}"
+            bar = f"{Colors.GREEN}{'#' * filled}{Colors.RESET}{Colors.DIM}{'-' * empty}{Colors.RESET}"
+            pct_text = f"{Colors.BOLD}{pct:3d}%{Colors.RESET}"
+        else:
+            label = self.label
+            bar = "#" * filled + "-" * empty
+            pct_text = f"{pct:3d}%"
+        print(f"\r{label} [{bar}] {pct_text}", end="", file=sys.stderr, flush=True)
 
     def finish(self):
         if not self.enabled:
@@ -258,23 +293,26 @@ def main(argv=None):
 
     input_path = Path(args.input)
     if not input_path.exists():
-        print(f"wordtrack: error: file not found: {input_path}", file=sys.stderr)
+        print(style(f"wordtrack: error: file not found: {input_path}", Colors.RED), file=sys.stderr)
         return 1
     if not input_path.is_file():
-        print(f"wordtrack: error: not a file: {input_path}", file=sys.stderr)
+        print(style(f"wordtrack: error: not a file: {input_path}", Colors.RED), file=sys.stderr)
         return 1
 
     if args.words_per_line < 1:
-        print("wordtrack: error: --words-per-line must be at least 1", file=sys.stderr)
+        print(style("wordtrack: error: --words-per-line must be at least 1", Colors.RED), file=sys.stderr)
         return 1
     if args.max_gap <= 0:
-        print("wordtrack: error: --max-gap must be greater than 0", file=sys.stderr)
+        print(style("wordtrack: error: --max-gap must be greater than 0", Colors.RED), file=sys.stderr)
         return 1
 
     if shutil.which("ffmpeg") is None:
         print(
-            "wordtrack: error: ffmpeg was not found on your PATH. "
-            "Install ffmpeg and try again.",
+            style(
+                "wordtrack: error: ffmpeg was not found on your PATH. "
+                "Install ffmpeg and try again.",
+                Colors.RED,
+            ),
             file=sys.stderr,
         )
         return 1
@@ -287,17 +325,16 @@ def main(argv=None):
 
     try:
         with tempfile.TemporaryDirectory(prefix="wordtrack-") as workdir:
-            print(f"Decoding audio from '{input_path}'...", file=sys.stderr)
+            print(style(f"Decoding audio from '{input_path}'...", Colors.CYAN), file=sys.stderr)
             try:
                 wav_path = extract_audio(input_path, workdir)
             except RuntimeError as exc:
-                print(f"wordtrack: error: {exc}", file=sys.stderr)
+                print(style(f"wordtrack: error: {exc}", Colors.RED), file=sys.stderr)
                 return 1
 
-            print(f"Loading '{args.model}' model...", file=sys.stderr)
+            print(style(f"Loading '{args.model}' model...", Colors.CYAN), file=sys.stderr)
             model = WhisperModel(args.model, device="cpu", compute_type="int8")
 
-            print("Transcribing...", file=sys.stderr)
             segments, info = model.transcribe(
                 str(wav_path),
                 language=args.language,
@@ -306,6 +343,11 @@ def main(argv=None):
             )
 
             progress = ProgressBar(total=info.duration)
+            if progress.enabled:
+                progress.update(0)  # show the bar immediately, before the first segment lands
+            else:
+                print(style("Transcribing...", Colors.CYAN), file=sys.stderr)
+
             words = []
             for segment in segments:
                 if segment.words:
@@ -313,18 +355,30 @@ def main(argv=None):
                 progress.update(segment.end)
             progress.finish()
     except Exception as exc:  # model/runtime failures: no raw traceback for the user
-        print(f"wordtrack: error: {exc}", file=sys.stderr)
+        print(style(f"wordtrack: error: {exc}", Colors.RED), file=sys.stderr)
         return 1
 
     if not words:
-        print("wordtrack: no speech detected in this file.", file=sys.stderr)
+        print(style("wordtrack: no speech detected in this file.", Colors.YELLOW), file=sys.stderr)
         return 1
 
     cues = group_words(words, args.words_per_line, args.max_gap)
     WRITERS[args.format](cues, out_path)
 
-    print(f"Detected language: {info.language} ({info.language_probability * 100:.1f}% confidence)")
-    print(f"Wrote {len(cues)} caption cue{'s' if len(cues) != 1 else ''} to {out_path}")
+    print(
+        style(
+            f"Detected language: {info.language} ({info.language_probability * 100:.1f}% confidence)",
+            Colors.GREEN,
+            stream=sys.stdout,
+        )
+    )
+    print(
+        style(
+            f"Wrote {len(cues)} caption cue{'s' if len(cues) != 1 else ''} to {out_path}",
+            Colors.GREEN,
+            stream=sys.stdout,
+        )
+    )
     return 0
 
 

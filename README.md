@@ -65,9 +65,11 @@ wordtrack <input-file> [options]
 | `--language` | string | `en` | Spoken language code passed to the model |
 | `-h`, `--help` | flag | — | Show usage and exit immediately |
 
-On completion, wordtrack prints the detected language and the model's
-confidence in that detection, the number of caption cues written, and the
-output path.
+While running, wordtrack shows colored status messages and a live
+progress bar during transcription (both are skipped automatically when
+output isn't an interactive terminal, or when `NO_COLOR` is set). On
+completion, it prints the detected language and the model's confidence in
+that detection, the number of caption cues written, and the output path.
 
 ### Model sizes
 

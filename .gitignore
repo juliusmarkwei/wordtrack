@@ -7,3 +7,6 @@ venv/
 *.sbv
 *.ssa
 *.ass
+*.lrc
+
+CLAUDE.local.md

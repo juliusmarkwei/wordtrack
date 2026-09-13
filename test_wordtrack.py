@@ -141,5 +141,76 @@ class LargeTranscriptWriteTests(unittest.TestCase):
         self.assertIsNone(wt.cue_count_warning(len(entries), threshold=1000))
 
 
+class ConvertRepairTests(unittest.TestCase):
+    """wordtrack convert <file> --format <same format> repairs an existing
+    caption file in place (zero-duration cues, oversized cue counts) using
+    the exact same finalize_entries() pipeline as transcription."""
+
+    def _write_word_by_word_srt(self, path, count, gap_between=0.15):
+        words = []
+        t = 0.0
+        for i in range(count):
+            # every 20th word gets a zero-duration timestamp, like the
+            # real Whisper defect this is meant to repair
+            end = t if i % 20 == 0 else t + 0.2
+            words.append((t, end, f"word{i}"))
+            t = max(end, t) + gap_between
+        entries = [(s, e, txt) for s, e, txt in words]
+        pseudo_cues = [[wt.ParsedWord(s, e, f" {t}")] for s, e, t in entries]
+        wt.write_srt(pseudo_cues, path)
+
+    def test_repairs_zero_duration_cues_in_place_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "captions.srt"
+            self._write_word_by_word_srt(src, count=30)
+
+            original = wt.parse_srt(src.read_text(encoding="utf-8"))
+            self.assertTrue(any(end - start <= 0 for start, end, _ in original))
+
+            rc = wt.run_convert([str(src), "--format", "srt", "--warn-threshold", "1000"])
+            self.assertEqual(rc, 0)
+
+            fixed_path = src.with_name("captions.fixed.srt")
+            self.assertTrue(fixed_path.exists())
+            fixed = wt.parse_srt(fixed_path.read_text(encoding="utf-8"))
+            for start, end, _ in fixed:
+                self.assertGreaterEqual(end - start, 0.12 - 1e-9)
+
+    def test_auto_regroups_oversized_source_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "big.srt"
+            self._write_word_by_word_srt(src, count=1200)
+
+            rc = wt.run_convert([str(src), "--format", "srt", "--warn-threshold", "300"])
+            self.assertEqual(rc, 0)
+
+            fixed = wt.parse_srt(src.with_name("big.fixed.srt").read_text(encoding="utf-8"))
+            self.assertLessEqual(len(fixed), 300)
+
+    def test_explicit_words_per_line_is_honored_even_if_over_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "big.srt"
+            self._write_word_by_word_srt(src, count=1200)
+
+            rc = wt.run_convert(
+                [str(src), "--format", "srt", "--words-per-line", "1", "--warn-threshold", "300"]
+            )
+            self.assertEqual(rc, 0)
+
+            fixed = wt.parse_srt(src.with_name("big.fixed.srt").read_text(encoding="utf-8"))
+            self.assertEqual(len(fixed), 1200)
+
+    def test_never_overwrites_source_without_explicit_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "captions.srt"
+            self._write_word_by_word_srt(src, count=10)
+            original_content = src.read_text(encoding="utf-8")
+
+            wt.run_convert([str(src), "--format", "srt"])
+
+            self.assertEqual(src.read_text(encoding="utf-8"), original_content)
+            self.assertTrue(src.with_name("captions.fixed.srt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

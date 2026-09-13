@@ -119,7 +119,7 @@ def build_convert_parser():
     parser = argparse.ArgumentParser(
         prog="wordtrack convert",
         description="Convert an existing caption file to another subtitle format, "
-        "without re-running speech recognition.",
+        "or repair/regroup it in place, without re-running speech recognition.",
     )
     parser.add_argument(
         "input", metavar="<input-file>", help="Path to the existing caption file to convert"
@@ -128,13 +128,47 @@ def build_convert_parser():
         "--format",
         choices=FORMAT_CHOICES,
         required=True,
-        help="Target subtitle format",
+        help="Target subtitle format (can be the same as the source format, "
+        "to just repair/regroup a file in place)",
     )
     parser.add_argument(
         "--from-format",
         choices=FORMAT_CHOICES,
         default=None,
         help="Source format, if it can't be inferred from the input file's extension",
+    )
+    parser.add_argument(
+        "--words-per-line",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Regroup into at most this many entries per cue (default: leave "
+        "cues as-is, unless that would exceed --warn-threshold - see "
+        "--words-per-line under `wordtrack --help`)",
+    )
+    parser.add_argument(
+        "--max-gap",
+        type=float,
+        default=0.6,
+        metavar="SECONDS",
+        help="Max gap between entries before regrouping splits a cue early (default: 0.6)",
+    )
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=0.12,
+        metavar="SECONDS",
+        help="Minimum cue duration; shorter cues are extended without "
+        "overlapping the next cue (default: 0.12). Always applied, "
+        "fixing any zero-duration cues in the source file.",
+    )
+    parser.add_argument(
+        "--warn-threshold",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="Auto-regroup (if --words-per-line wasn't passed) or warn "
+        "(if it was) when the output has more than this many cues (default: 1000)",
     )
     parser.add_argument(
         "--out",
@@ -269,6 +303,28 @@ def cue_count_warning(cue_count, threshold):
         f"--max-gap, it still splits cues on natural pauses instead of "
         f"producing one long run-on line."
     )
+
+
+def finalize_entries(words, words_per_line, words_per_line_explicit, max_gap, min_duration, warn_threshold):
+    """Group timestamped units into cues, auto-regrouping and enforcing the
+    minimum-duration floor. Shared by run_transcribe() and run_convert() -
+    "words" here just needs .start/.end/.word, whether each unit came from
+    Whisper or from re-parsing an existing word-by-word caption file.
+
+    Returns (entries, auto_regrouped_to) where auto_regrouped_to is the
+    words_per_line value it switched to, or None if it didn't need to.
+    """
+    cues = group_words(words, words_per_line, max_gap)
+
+    auto_regrouped_to = None
+    if not words_per_line_explicit and len(cues) > warn_threshold:
+        suggested = find_min_words_per_line(words, max_gap, warn_threshold)
+        if suggested is not None and suggested != words_per_line:
+            cues = group_words(words, suggested, max_gap)
+            auto_regrouped_to = suggested
+
+    entries = enforce_min_duration(cue_entries(cues), min_duration)
+    return entries, auto_regrouped_to
 
 
 def write_srt(cues, out_path):
@@ -551,14 +607,19 @@ def run_convert(argv):
         )
         return 1
 
-    if source_format == args.format:
-        print(
-            style(
-                f"wordtrack: error: source and target are both '{args.format}' — nothing to convert",
-                Colors.RED,
-            ),
-            file=sys.stderr,
-        )
+    words_per_line_explicit = args.words_per_line is not None
+    words_per_line = args.words_per_line if words_per_line_explicit else 1
+    if words_per_line < 1:
+        print(style("wordtrack: error: --words-per-line must be at least 1", Colors.RED), file=sys.stderr)
+        return 1
+    if args.max_gap <= 0:
+        print(style("wordtrack: error: --max-gap must be greater than 0", Colors.RED), file=sys.stderr)
+        return 1
+    if args.min_duration < 0:
+        print(style("wordtrack: error: --min-duration must be at least 0", Colors.RED), file=sys.stderr)
+        return 1
+    if args.warn_threshold < 0:
+        print(style("wordtrack: error: --warn-threshold must be at least 0", Colors.RED), file=sys.stderr)
         return 1
 
     try:
@@ -575,18 +636,46 @@ def run_convert(argv):
         )
         return 1
 
-    out_path = Path(args.out) if args.out else input_path.with_suffix(f".{args.format}")
-    cues = [[ParsedWord(start, end, f" {text}")] for start, end, text in parsed]
-    WRITERS[args.format](cues, out_path)
+    if args.out:
+        out_path = Path(args.out)
+    elif source_format == args.format:
+        # Same format in and out (a repair/regroup pass) - never silently
+        # overwrite the source file when no --out was given.
+        out_path = input_path.with_name(f"{input_path.stem}.fixed{input_path.suffix}")
+    else:
+        out_path = input_path.with_suffix(f".{args.format}")
+
+    entries_as_words = [ParsedWord(start, end, f" {text}") for start, end, text in parsed]
+    entries, auto_regrouped_to = finalize_entries(
+        entries_as_words, words_per_line, words_per_line_explicit, args.max_gap, args.min_duration, args.warn_threshold
+    )
+    pseudo_cues = [[ParsedWord(start, end, f" {text}")] for start, end, text in entries]
+    WRITERS[args.format](pseudo_cues, out_path)
 
     print(
         style(
-            f"Converted {len(cues)} caption cue{'s' if len(cues) != 1 else ''} "
+            f"Converted {len(entries)} caption cue{'s' if len(entries) != 1 else ''} "
             f"from {source_format} to {args.format}: {out_path}",
             Colors.GREEN,
             stream=sys.stdout,
         )
     )
+
+    if auto_regrouped_to:
+        print(
+            style(
+                f"Source had {len(parsed)} cues, over --warn-threshold ({args.warn_threshold}); "
+                f"auto-regrouped using --words-per-line {auto_regrouped_to} instead. Pass "
+                f"--words-per-line explicitly to keep the original grouping anyway.",
+                Colors.YELLOW,
+            ),
+            file=sys.stderr,
+        )
+    else:
+        warning = cue_count_warning(len(entries), args.warn_threshold)
+        if warning:
+            print(style(warning, Colors.YELLOW), file=sys.stderr)
+
     return 0
 
 
@@ -673,17 +762,9 @@ def run_transcribe(argv):
         print(style("wordtrack: no speech detected in this file.", Colors.YELLOW), file=sys.stderr)
         return 1
 
-    cues = group_words(words, words_per_line, args.max_gap)
-
-    auto_regrouped_to = None
-    if not words_per_line_explicit and len(cues) > args.warn_threshold:
-        suggested = find_min_words_per_line(words, args.max_gap, args.warn_threshold)
-        if suggested is not None and suggested != words_per_line:
-            words_per_line = suggested
-            cues = group_words(words, words_per_line, args.max_gap)
-            auto_regrouped_to = suggested
-
-    entries = enforce_min_duration(cue_entries(cues), args.min_duration)
+    entries, auto_regrouped_to = finalize_entries(
+        words, words_per_line, words_per_line_explicit, args.max_gap, args.min_duration, args.warn_threshold
+    )
     pseudo_cues = [[ParsedWord(start, end, f" {text}")] for start, end, text in entries]
     WRITERS[args.format](pseudo_cues, out_path)
 

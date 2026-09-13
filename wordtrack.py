@@ -63,9 +63,12 @@ def build_parser():
     parser.add_argument(
         "--words-per-line",
         type=int,
-        default=1,
+        default=None,
         metavar="N",
-        help="Max words per caption cue (default: 1)",
+        help="Max words per caption cue (default: 1). If omitted and the "
+        "default would produce more cues than --warn-threshold, wordtrack "
+        "automatically regroups into fewer, larger cues instead; passing "
+        "this flag explicitly always overrides that.",
     )
     parser.add_argument(
         "--max-gap",
@@ -201,6 +204,30 @@ def group_words(words, words_per_line, max_gap):
     if current:
         cues.append(current)
     return cues
+
+
+def find_min_words_per_line(words, max_gap, threshold):
+    """Smallest words_per_line that keeps group_words() under threshold cues.
+
+    Cue count is non-increasing as words_per_line grows (a larger word cap
+    can only remove word-count-triggered splits, never gap-triggered ones),
+    so this is a plain binary search. Returns None if even the largest
+    possible word cap - i.e. splitting on max_gap alone - still exceeds
+    threshold, meaning words-per-line can't fix this by itself.
+    """
+    total = len(words)
+    if total <= 1:
+        return total or 1
+    if len(group_words(words, total, max_gap)) > threshold:
+        return None
+    lo, hi = 1, total
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if len(group_words(words, mid, max_gap)) <= threshold:
+            hi = mid
+        else:
+            lo = mid + 1
+    return hi
 
 
 def cue_text(cue):
@@ -575,7 +602,9 @@ def run_transcribe(argv):
         print(style(f"wordtrack: error: not a file: {input_path}", Colors.RED), file=sys.stderr)
         return 1
 
-    if args.words_per_line < 1:
+    words_per_line_explicit = args.words_per_line is not None
+    words_per_line = args.words_per_line if words_per_line_explicit else 1
+    if words_per_line < 1:
         print(style("wordtrack: error: --words-per-line must be at least 1", Colors.RED), file=sys.stderr)
         return 1
     if args.max_gap <= 0:
@@ -644,7 +673,16 @@ def run_transcribe(argv):
         print(style("wordtrack: no speech detected in this file.", Colors.YELLOW), file=sys.stderr)
         return 1
 
-    cues = group_words(words, args.words_per_line, args.max_gap)
+    cues = group_words(words, words_per_line, args.max_gap)
+
+    auto_regrouped_to = None
+    if not words_per_line_explicit and len(cues) > args.warn_threshold:
+        suggested = find_min_words_per_line(words, args.max_gap, args.warn_threshold)
+        if suggested is not None and suggested != words_per_line:
+            words_per_line = suggested
+            cues = group_words(words, words_per_line, args.max_gap)
+            auto_regrouped_to = suggested
+
     entries = enforce_min_duration(cue_entries(cues), args.min_duration)
     pseudo_cues = [[ParsedWord(start, end, f" {text}")] for start, end, text in entries]
     WRITERS[args.format](pseudo_cues, out_path)
@@ -664,9 +702,21 @@ def run_transcribe(argv):
         )
     )
 
-    warning = cue_count_warning(len(entries), args.warn_threshold)
-    if warning:
-        print(style(warning, Colors.YELLOW), file=sys.stderr)
+    if auto_regrouped_to:
+        print(
+            style(
+                f"Word-by-word output would have been {len(words)} cues, over "
+                f"--warn-threshold ({args.warn_threshold}); auto-regrouped using "
+                f"--words-per-line {auto_regrouped_to} instead. Pass --words-per-line "
+                f"explicitly (e.g. --words-per-line 1) to force word-by-word output anyway.",
+                Colors.YELLOW,
+            ),
+            file=sys.stderr,
+        )
+    else:
+        warning = cue_count_warning(len(entries), args.warn_threshold)
+        if warning:
+            print(style(warning, Colors.YELLOW), file=sys.stderr)
 
     return 0
 

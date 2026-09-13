@@ -58,10 +58,10 @@ wordtrack <input-file> [options]
 |---|---|---|---|
 | `<input-file>` | positional, required | — | Path to the video or audio file to caption |
 | `--model` | choice: `tiny`, `base`, `small`, `medium`, `large-v3` | `small` | Whisper model size — trade-off between speed and accuracy |
-| `--words-per-line` | integer | `1` | Max words per caption cue |
+| `--words-per-line` | integer | `1` | Max words per caption cue. If you don't pass this, and word-by-word output would exceed `--warn-threshold` cues, wordtrack automatically regroups into fewer, larger cues instead — pass this flag explicitly to force word-by-word regardless |
 | `--max-gap` | float (seconds) | `0.6` | Max silence allowed inside one cue before it splits into two |
 | `--min-duration` | float (seconds) | `0.12` | Minimum cue duration; shorter cues are extended (without overlapping the next cue) |
-| `--warn-threshold` | integer | `1000` | Print a warning if the output has more cues than this |
+| `--warn-threshold` | integer | `1000` | Cue-count threshold that triggers auto-regrouping (see `--words-per-line`) when it's not set explicitly, or a warning when it is |
 | `--format` | choice: `srt`, `vtt`, `sbv`, `ssa`, `ass`, `lrc` | `srt` | Subtitle output format |
 | `--out` | path | `<input file>.<format>` | Output file path |
 | `--language` | string | `en` | Spoken language code passed to the model |
@@ -118,22 +118,32 @@ to that floor, without ever pushing it past the start of the next cue.
 
 ### Large word-by-word files can import slowly (or hang) in some editors
 
-The default `--words-per-line 1` produces one cue per word — the bold,
-pop-in caption style — which for a long recording can mean several
+Not passing `--words-per-line` produces one cue per word by default — the
+bold, pop-in caption style — which for a long recording can mean several
 thousand cues. Some editors (CapCut included) are known to import
 subtitle files with more than roughly 1,000 cues slowly, or appear to
-hang. If wordtrack writes more cues than `--warn-threshold` (default
-`1000`), it prints a warning to say so; the file is still written
-successfully either way.
+hang.
 
-**If you hit this**, the fix is not to change `--words-per-line`'s
-default — it's to raise it for that run. `--words-per-line 6` (combined
-with the existing `--max-gap`, which still splits a cue early on any
-natural pause) produces normal-reading subtitle lines instead of
-word-by-word ones, at a fraction of the cue count:
+If word-by-word output would exceed `--warn-threshold` (default `1000`)
+cues, wordtrack **automatically regroups** into the fewest, largest cues
+that fit under that limit — the existing `--max-gap` still splits a cue
+early on any natural pause, so the result reads like normal subtitle
+lines rather than one long run-on line — and prints a note saying it did
+so, along with the `--words-per-line` value it picked:
+
+```
+Word-by-word output would have been 5841 cues, over --warn-threshold (1000);
+auto-regrouped using --words-per-line 7 instead. Pass --words-per-line
+explicitly (e.g. --words-per-line 1) to force word-by-word output anyway.
+```
+
+To always get strict word-by-word output regardless of file length, pass
+`--words-per-line 1` explicitly — an explicit `--words-per-line` (any
+value) is never overridden; you'll instead just see a warning (file still
+written) if it produces more cues than `--warn-threshold`:
 
 ```bash
-wordtrack clip.mp4 --words-per-line 6
+wordtrack clip.mp4 --words-per-line 1
 ```
 
 ## Converting between caption formats

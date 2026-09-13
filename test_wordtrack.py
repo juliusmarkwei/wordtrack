@@ -33,6 +33,28 @@ class GroupWordsTests(unittest.TestCase):
         self.assertEqual(len(cues), 2)
 
 
+class FindMinWordsPerLineTests(unittest.TestCase):
+    def test_finds_smallest_cap_under_threshold(self):
+        # 1000 words, no long pauses -> words_per_line=1 gives 1000 cues.
+        words = [Word(i * 0.3, i * 0.3 + 0.2, f" w{i}", 0.9) for i in range(1000)]
+        suggested = wt.find_min_words_per_line(words, max_gap=0.6, threshold=200)
+        self.assertIsNotNone(suggested)
+        self.assertLessEqual(len(wt.group_words(words, suggested, 0.6)), 200)
+        # one less should not be enough (smallest such cap)
+        self.assertGreater(len(wt.group_words(words, suggested - 1, 0.6)), 200)
+
+    def test_returns_none_when_gaps_alone_exceed_threshold(self):
+        # Every word is its own gap-isolated cue no matter the word cap.
+        words = [Word(i * 2.0, i * 2.0 + 0.1, f" w{i}", 0.9) for i in range(50)]
+        suggested = wt.find_min_words_per_line(words, max_gap=0.5, threshold=10)
+        self.assertIsNone(suggested)
+
+    def test_already_under_threshold_needs_no_increase(self):
+        words = [Word(i * 0.3, i * 0.3 + 0.2, f" w{i}", 0.9) for i in range(5)]
+        suggested = wt.find_min_words_per_line(words, max_gap=0.6, threshold=1000)
+        self.assertEqual(suggested, 1)
+
+
 class MinDurationTests(unittest.TestCase):
     def test_zero_duration_word_is_extended_to_the_floor(self):
         words = [

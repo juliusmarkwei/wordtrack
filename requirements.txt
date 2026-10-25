@@ -1,1 +1,3 @@
 faster-whisper>=1.0.0,<2.0.0
+# PyAV 19 removed av.open(metadata_errors=...), which faster-whisper 1.2.x still passes.
+av<19

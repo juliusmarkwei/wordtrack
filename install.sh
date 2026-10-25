@@ -93,7 +93,34 @@ ensure_dependency() {
   command -v "$cmd" >/dev/null 2>&1 || die "failed to install '$cmd'"
 }
 
-ensure_dependency python3 python3 python3
+# faster-whisper's ctranslate2 dependency only publishes wheels for these
+# CPython versions; a newer default python3 makes pip's resolve impossible.
+SUPPORTED_PYTHONS="3.14 3.13 3.12 3.11 3.10 3.9"
+
+find_python() {
+  local v cand
+  for v in $SUPPORTED_PYTHONS; do
+    command -v "python$v" >/dev/null 2>&1 && { echo "python$v"; return 0; }
+  done
+  for cand in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    v="$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" || continue
+    case " $SUPPORTED_PYTHONS " in *" $v "*) echo "$cand"; return 0 ;; esac
+  done
+  return 1
+}
+
+PYTHON="$(find_python)" || {
+  log "No supported Python (3.9-3.14) was found."
+  if [ "$PLATFORM" = "macos" ]; then
+    install_with_brew python@3.13
+    PYTHON="$(find_python)" || die "failed to find python3.13 after installing it"
+  else
+    die "install Python 3.9-3.14 (e.g. python3.12) and re-run this script."
+  fi
+}
+log "Using $("$PYTHON" --version 2>&1) ($PYTHON)"
+
 ensure_dependency ffmpeg ffmpeg ffmpeg
 
 log "Installing wordtrack into ${WORDTRACK_INSTALL_DIR}..."
@@ -105,7 +132,7 @@ for f in wordtrack.py requirements.txt; do
 done
 
 log "Creating virtual environment..."
-python3 -m venv "${WORDTRACK_INSTALL_DIR}/venv"
+"$PYTHON" -m venv --clear "${WORDTRACK_INSTALL_DIR}/venv"
 "${WORDTRACK_INSTALL_DIR}/venv/bin/pip" install --upgrade pip >/dev/null
 "${WORDTRACK_INSTALL_DIR}/venv/bin/pip" install -r "${WORDTRACK_INSTALL_DIR}/requirements.txt"
 

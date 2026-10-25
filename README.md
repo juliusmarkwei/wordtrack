@@ -16,7 +16,8 @@ video editor and style however you like.
 ## Requirements
 
 - macOS or Linux
-- Python 3
+- Python 3.9–3.14 (newer versions aren't supported yet by faster-whisper's
+  `ctranslate2` dependency; the installer picks a supported one if present)
 - ffmpeg
 
 You don't need to install these yourself — `install.sh` detects what's
